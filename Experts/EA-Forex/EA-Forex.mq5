@@ -1,5 +1,5 @@
 #property copyright "EA-Forex project"
-#property version   "0.1"
+#property version   "0.3"
 #property strict
 
 input string InpSymbol = "EURUSD";
@@ -20,32 +20,95 @@ bool ValidateConfiguration()
 
 // H2-MD01: obtain one complete candle (shift 1) and current quote.
 // No trading decisions or orders are allowed in this increment.
+//H2-MD03: validate the market data for integrity, recency, and consistency.
 bool ReadMarketData(MqlRates &closedBar, MqlTick &tick)
 {
+   const int maxTickAgeSeconds = 120;
+   const int maxFutureSkewSeconds = 5;
+
    MqlRates bars[];
    ArraySetAsSeries(bars, true);
+
    ResetLastError();
    if(CopyRates(InpSymbol, InpTimeframe, 1, 1, bars) != 1)
    {
-      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | CopyRates error=%d", GetLastError());
+      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | CopyRates error=%d",
+                  GetLastError());
       return false;
    }
+
+   ResetLastError();
    if(!SymbolInfoTick(InpSymbol, tick))
    {
-      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d", GetLastError());
+      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d",
+                  GetLastError());
       return false;
    }
+
    closedBar = bars[0];
-   if(closedBar.time <= 0 || closedBar.high < closedBar.low ||
-      closedBar.open <= 0 || closedBar.high <= 0 || closedBar.low <= 0 ||
-      closedBar.close <= 0 || tick.bid <= 0 || tick.ask <= 0 ||
-      tick.ask < tick.bid || tick.time <= 0)
+
+   // MD02-01: integridad OHLC y Bid/Ask.
+   if(closedBar.time <= 0 ||
+      closedBar.open <= 0 ||
+      closedBar.high <= 0 ||
+      closedBar.low <= 0 ||
+      closedBar.close <= 0 ||
+      closedBar.high < MathMax(closedBar.open, closedBar.close) ||
+      closedBar.low > MathMin(closedBar.open, closedBar.close) ||
+      tick.bid <= 0 ||
+      tick.ask <= 0 ||
+      tick.ask < tick.bid ||
+      tick.time <= 0)
    {
       Print("EA-FX H2 DATA_INVALID | OHLC or tick invariant failed");
       return false;
    }
+
+   // MD02-02: referencia temporal del servidor.
+   datetime now = TimeTradeServer();
+
+   if(now <= 0)
+      now = TimeCurrent();
+
+   if(now <= 0)
+   {
+      Print("EA-FX H2 TIME_UNAVAILABLE");
+      return false;
+   }
+
+   // MD02-03: vigencia del tick.
+   long tickAge = (long)now - (long)tick.time;
+
+   if(tickAge > maxTickAgeSeconds ||
+      tickAge < -maxFutureSkewSeconds)
+   {
+      PrintFormat("EA-FX H2 TICK_STALE | age_seconds=%I64d",
+                  tickAge);
+      return false;
+   }
+
+   // MD02-04: última vela cerrada y antigüedad.
+   int periodSeconds = PeriodSeconds(InpTimeframe);
+
+   if(periodSeconds <= 0)
+   {
+      Print("EA-FX H2 TIMEFRAME_INVALID");
+      return false;
+   }
+
+   long barAge = (long)now - (long)closedBar.time;
+
+   if(barAge < periodSeconds ||
+      barAge > 2 * periodSeconds + maxTickAgeSeconds)
+   {
+      PrintFormat("EA-FX H2 BAR_STALE | age_seconds=%I64d",
+                  barAge);
+      return false;
+   }
+
    return true;
 }
+
 
 int OnInit()
 {
