@@ -1,11 +1,22 @@
 #property copyright "EA-Forex project"
-#property version   "0.3"
+#property version   "0.4.2"
 #property strict
 
 input string InpSymbol = "EURUSD";
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_H1;
 input double InpRiskPercent = 0.5;
 input bool InpEnableTrading = false; // Reserved; no orders in H2
+
+//Este parámetro es exclusivamente de diagnóstico y deberá retirarse al finalizar P02
+enum ENUM_MD_TEST_FAILURE
+{
+   MD_FAILURE_NONE = 0,
+   MD_FAILURE_RATES = 1,
+   MD_FAILURE_TICK = 2
+};
+
+input ENUM_MD_TEST_FAILURE InpMDTestFailure =  MD_FAILURE_NONE; //MD_FAILURE_TICK; // MD_FAILURE_RATES;
+//FIN DE Este parámetro es exclusivamente de diagnóstico y deberá retirarse al finalizar P02
 
 datetime g_lastClosedBarTime = 0;
 
@@ -81,49 +92,87 @@ bool ValidateClosedBarFreshness(
           barAge <= 2 * (long)periodSeconds + toleranceSeconds;
 }
 
+bool ValidateMarketDataAvailability(
+   const int copiedBars,
+   const bool tickAvailable)
+{
+   return copiedBars == 1 && tickAvailable;
+}
+
 
 // H2-MD01: obtain one complete candle (shift 1) and current quote.
 // No trading decisions or orders are allowed in this increment.
 //H2-MD03: validate the market data for integrity, recency, and consistency.
+
 bool ReadMarketData(MqlRates &closedBar, MqlTick &tick)
 {
    const int maxTickAgeSeconds = 120;
    const int maxFutureSkewSeconds = 5;
 
    MqlRates bars[];
+   MqlTick candidateTick = {};
    ArraySetAsSeries(bars, true);
 
+   
+   // 1. Adquisicion de vela cerrada
    ResetLastError();
-   if(CopyRates(InpSymbol, InpTimeframe, 1, 1, bars) != 1)
+
+   int copiedBars = -1;
+   int ratesError = 0;
+
+   if(InpMDTestFailure != MD_FAILURE_RATES)
    {
-      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | CopyRates error=%d",
-                  GetLastError());
+      copiedBars = CopyRates(
+         InpSymbol, InpTimeframe, 1, 1, bars);
+      ratesError = GetLastError();
+   }
+
+   if(!ValidateMarketDataAvailability(copiedBars, true))
+   {
+      PrintFormat(
+         "EA-FX H2 DATA_UNAVAILABLE | CopyRates count=%d error=%d | injected=%d",
+         copiedBars, ratesError,
+         (int)(InpMDTestFailure == MD_FAILURE_RATES));
       return false;
    }
 
+   // 2. Adquisicion de cotizacion
    ResetLastError();
-   if(!SymbolInfoTick(InpSymbol, tick))
+
+   bool tickAvailable = false;
+   int tickError = 0;
+
+   if(InpMDTestFailure != MD_FAILURE_TICK)
    {
-      PrintFormat("EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d",
-                  GetLastError());
+      tickAvailable = SymbolInfoTick(
+         InpSymbol, candidateTick);
+      tickError = GetLastError();
+   }
+
+   if(!ValidateMarketDataAvailability(copiedBars, tickAvailable))
+   {
+      PrintFormat(
+         "EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d | injected=%d",
+         tickError,
+         (int)(InpMDTestFailure == MD_FAILURE_TICK));
       return false;
    }
 
-   closedBar = bars[0];
 
-   // MD02-01: integridad OHLC y Bid/Ask.   
-   closedBar = bars[0];
+  
 
-   if(!ValidateMarketDataIntegrity(closedBar, tick))
+   MqlRates candidateBar = bars[0];
+
+   // 3. Integridad
+   if(!ValidateMarketDataIntegrity(
+         candidateBar, candidateTick))
    {
       Print("EA-FX H2 DATA_INVALID | OHLC or tick invariant failed");
       return false;
    }
 
-
-   // MD02-02: referencia temporal del servidor.
+   // 4. Referencia temporal
    datetime now = TimeTradeServer();
-
    if(now <= 0)
       now = TimeCurrent();
 
@@ -133,16 +182,19 @@ bool ReadMarketData(MqlRates &closedBar, MqlTick &tick)
       return false;
    }
 
-   // MD02-03: vigencia del tick.   
-   if(!ValidateTickFreshness(tick, now, maxTickAgeSeconds, maxFutureSkewSeconds))
+   // 5. Vigencia del tick
+   if(!ValidateTickFreshness(
+         candidateTick, now,
+         maxTickAgeSeconds,
+         maxFutureSkewSeconds))
    {
-         long tickAge = (long)now - (long)tick.time;
-         PrintFormat("EA-FX H2 TICK_STALE | age_seconds=%I64d", tickAge);
-         return false;
+      PrintFormat(
+         "EA-FX H2 TICK_STALE | age_seconds=%I64d",
+         (long)now - (long)candidateTick.time);
+      return false;
    }
 
-
-   // MD02-04: última vela cerrada y antigüedad.
+   // 6. Vigencia de la vela
    int periodSeconds = PeriodSeconds(InpTimeframe);
 
    if(periodSeconds <= 0)
@@ -151,17 +203,23 @@ bool ReadMarketData(MqlRates &closedBar, MqlTick &tick)
       return false;
    }
 
-   if(!ValidateClosedBarFreshness( closedBar,  now,  periodSeconds, maxTickAgeSeconds))
+   if(!ValidateClosedBarFreshness(
+         candidateBar, now,
+         periodSeconds, maxTickAgeSeconds))
    {
-      long barAge = (long)now - (long)closedBar.time;
-
-      PrintFormat( "EA-FX H2 BAR_STALE | age_seconds=%I64d",  barAge );
-
+      PrintFormat(
+         "EA-FX H2 BAR_STALE | age_seconds=%I64d",
+         (long)now - (long)candidateBar.time);
       return false;
    }
 
+   // 7. Publicar exclusivamente datos validados
+   closedBar = candidateBar;
+   tick = candidateTick;
+
    return true;
 }
+
 
 
 bool Test_MD02_P02_InvalidOHLC()
@@ -279,6 +337,87 @@ bool Test_MD02_P04_ClosedBarFreshness()
 }
 
 
+bool Test_MD02_P05_DataUnavailable()
+{
+   // CopyRates no devuelve ninguna vela.
+   bool noBarsRejected =
+      !ValidateMarketDataAvailability(0, true);
+
+   // CopyRates devuelve error.
+   bool ratesErrorRejected =
+      !ValidateMarketDataAvailability(-1, true);
+
+   // SymbolInfoTick falla.
+   bool noTickRejected =
+      !ValidateMarketDataAvailability(1, false);
+
+   // Adquisicion correcta.
+   bool validAccepted =
+      ValidateMarketDataAvailability(1, true);
+
+   if(noBarsRejected &&
+      ratesErrorRejected &&
+      noTickRejected &&
+      validAccepted)
+   {
+      Print("EA-FX TEST MD02-P05 PASS | unavailable market data rejected");
+      return true;
+   }
+
+   Print("EA-FX TEST MD02-P05 FAIL | acquisition contract violated");
+   return false;
+}
+
+
+bool Test_MD03_P03_Regression()
+{
+   // Integridad OHLC y cotizaciones
+   bool p02 = Test_MD02_P02_InvalidOHLC();
+
+   // Vigencia de cotizaciones
+   bool p03 = Test_MD02_P03_StaleTick();
+
+   // Vigencia de velas cerradas
+   bool p04 = Test_MD02_P04_ClosedBarFreshness();
+
+   // Disponibilidad de datos
+   bool noBarsRejected =
+      !ValidateMarketDataAvailability(0, true);
+
+   bool ratesErrorRejected =
+      !ValidateMarketDataAvailability(-1, true);
+
+   bool noTickRejected =
+      !ValidateMarketDataAvailability(1, false);
+
+   bool validAccepted =
+      ValidateMarketDataAvailability(1, true);
+
+   bool p05 =
+      noBarsRejected &&
+      ratesErrorRejected &&
+      noTickRejected &&
+      validAccepted;
+
+   PrintFormat(
+      "EA-FX TEST MD03-P03 | P02=%d P03=%d P04=%d P05=%d",
+      (int)p02,
+      (int)p03,
+      (int)p04,
+      (int)p05
+   );
+
+   if(p02 && p03 && p04 && p05)
+   {
+      Print("EA-FX TEST MD03-P03 PASS | MarketData regression validated");
+      return true;
+   }
+
+   Print("EA-FX TEST MD03-P03 FAIL | MarketData regression failed");
+   return false;
+}
+
+
 int OnInit()
 {
    if(!ValidateConfiguration())
@@ -301,6 +440,7 @@ int OnInit()
    }
    PrintFormat("EA-FX H2 READY | symbol=%s | timeframe=%s | trading disabled", InpSymbol, EnumToString(InpTimeframe));
    
+  
    
    return INIT_SUCCEEDED;
 }
