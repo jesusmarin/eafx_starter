@@ -1,5 +1,5 @@
 #property copyright "EA-Forex project"
-#property version   "0.4.2"
+#property version   "0.4.2.5"
 #property strict
 
 input string InpSymbol = "EURUSD";
@@ -7,16 +7,6 @@ input ENUM_TIMEFRAMES InpTimeframe = PERIOD_H1;
 input double InpRiskPercent = 0.5;
 input bool InpEnableTrading = false; // Reserved; no orders in H2
 
-//Este parámetro es exclusivamente de diagnóstico y deberá retirarse al finalizar P02
-enum ENUM_MD_TEST_FAILURE
-{
-   MD_FAILURE_NONE = 0,
-   MD_FAILURE_RATES = 1,
-   MD_FAILURE_TICK = 2
-};
-
-input ENUM_MD_TEST_FAILURE InpMDTestFailure =  MD_FAILURE_NONE; //MD_FAILURE_TICK; // MD_FAILURE_RATES;
-//FIN DE Este parámetro es exclusivamente de diagnóstico y deberá retirarse al finalizar P02
 
 datetime g_lastClosedBarTime = 0;
 
@@ -57,6 +47,33 @@ bool ValidateMarketDataIntegrity(const MqlRates &bar,
    return true;
 }
 
+
+bool ValidateDemoAccount(const long tradeMode)
+{
+   return tradeMode == ACCOUNT_TRADE_MODE_DEMO;
+}
+
+bool Test_MD03_P04_AccountSafety()
+{
+   bool demoAccepted =
+      ValidateDemoAccount(ACCOUNT_TRADE_MODE_DEMO);
+
+   bool realRejected =
+      !ValidateDemoAccount(ACCOUNT_TRADE_MODE_REAL);
+
+   bool contestRejected =
+      !ValidateDemoAccount(ACCOUNT_TRADE_MODE_CONTEST);
+
+   bool passed =
+      demoAccepted && realRejected && contestRejected;
+
+   PrintFormat(
+      "EA-FX TEST MD03-P04 ACCOUNT_SAFETY %s",
+      passed ? "PASS" : "FAIL"
+   );
+
+   return passed;
+}
 
 bool ValidateTickFreshness(const MqlTick &tick,
                            const datetime referenceTime,
@@ -112,54 +129,39 @@ bool ReadMarketData(MqlRates &closedBar, MqlTick &tick)
    MqlRates bars[];
    MqlTick candidateTick = {};
    ArraySetAsSeries(bars, true);
-
-   
+    
    // 1. Adquisicion de vela cerrada
    ResetLastError();
 
-   int copiedBars = -1;
-   int ratesError = 0;
+   int copiedBars = CopyRates(
+      InpSymbol, InpTimeframe, 1, 1, bars);
 
-   if(InpMDTestFailure != MD_FAILURE_RATES)
-   {
-      copiedBars = CopyRates(
-         InpSymbol, InpTimeframe, 1, 1, bars);
-      ratesError = GetLastError();
-   }
+   int ratesError = GetLastError();
 
    if(!ValidateMarketDataAvailability(copiedBars, true))
    {
       PrintFormat(
-         "EA-FX H2 DATA_UNAVAILABLE | CopyRates count=%d error=%d | injected=%d",
-         copiedBars, ratesError,
-         (int)(InpMDTestFailure == MD_FAILURE_RATES));
+         "EA-FX H2 DATA_UNAVAILABLE | CopyRates count=%d error=%d",
+         copiedBars, ratesError);
       return false;
    }
 
    // 2. Adquisicion de cotizacion
    ResetLastError();
 
-   bool tickAvailable = false;
-   int tickError = 0;
+   bool tickAvailable = SymbolInfoTick(
+      InpSymbol, candidateTick);
 
-   if(InpMDTestFailure != MD_FAILURE_TICK)
-   {
-      tickAvailable = SymbolInfoTick(
-         InpSymbol, candidateTick);
-      tickError = GetLastError();
-   }
+   int tickError = GetLastError();
 
    if(!ValidateMarketDataAvailability(copiedBars, tickAvailable))
    {
       PrintFormat(
-         "EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d | injected=%d",
-         tickError,
-         (int)(InpMDTestFailure == MD_FAILURE_TICK));
+         "EA-FX H2 DATA_UNAVAILABLE | SymbolInfoTick error=%d",
+         tickError);
       return false;
    }
-
-
-  
+    
 
    MqlRates candidateBar = bars[0];
 
@@ -426,7 +428,7 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
-   if(AccountInfoInteger(ACCOUNT_TRADE_MODE) != ACCOUNT_TRADE_MODE_DEMO)
+   if(!ValidateDemoAccount(AccountInfoInteger(ACCOUNT_TRADE_MODE)))
    {
       Print("EA-FX H1: demo account required");
       return INIT_FAILED;
@@ -438,9 +440,9 @@ int OnInit()
       Print("EA-FX H2: InpEnableTrading must remain false");
       return INIT_PARAMETERS_INCORRECT;
    }
-   PrintFormat("EA-FX H2 READY | symbol=%s | timeframe=%s | trading disabled", InpSymbol, EnumToString(InpTimeframe));
-   
   
+   PrintFormat("EA-FX H2 READY | symbol=%s | timeframe=%s | trading disabled", InpSymbol, EnumToString(InpTimeframe));
+     
    
    return INIT_SUCCEEDED;
 }
