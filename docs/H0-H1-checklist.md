@@ -1,0 +1,11 @@
+# H0/H1 verification checklist
+- [ ] MT5 installed and build recorded
+- [ ] MetaEditor compiler version/build recorded
+- [ ] Demo account confirmed; no secrets committed
+- [ ] Git repository initialized and commit hash recorded
+- [ ] MQL5 compiled with 0 errors (warnings reviewed)
+- [ ] Invalid risk rejects initialization
+- [ ] Real account rejects initialization
+- [ ] Demo account initializes and deinitializes
+- [ ] No orders sent
+- [ ] Logs and screenshots archived with dates
